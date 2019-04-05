@@ -1,5 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { randomBytes } = require('crypto');
+const { promisify } = require('util');
 
 const Mutations = {
 	async createItem(parent, args, ctx, info) {
@@ -81,6 +83,63 @@ const Mutations = {
 		ctx.response.clearCookie('token');
 		return { message: 'Goodbye!' };
 	},
+	async requestReset(parent, { email }, ctx, info) {
+		// 1. Check if there is a user
+		const user = await ctx.db.query.user({ where: { email } });
+
+		if(!user) {
+			throw new Error(`No such user found for email ${email}`);
+		};
+		// 2. Set a reset token and expiry on that user
+		const randomBytesPromisified = promisify(randomBytes);
+		const resetToken = (await randomBytesPromisified(20)).toString('hex');
+		const resetTokenExpiry = Date.now() + 3600000;
+		const res = await ctx.db.mutation.updateUser({
+			where: { email },
+			data: { resetToken, resetTokenExpiry }
+		});
+
+		return { message: 'Thanks!' };
+		// 3. Email them the reset token
+	},
+	async resetPassword(parent, { resetToken, password, confirmPassword }, ctx, info) {
+		// 1. Check if passwords match
+		if(password !== confirmPassword) {
+			throw new Error("Yo passwords don't match!");
+		}
+		// 2. Check reset token legitimacy
+		// 3. Check expiration
+		const [user] = await ctx.db.query.users({
+			where: {
+				resetToken,
+				resetTokenExpiry_gte: Date.now() - 3600000
+			}
+		});
+
+		if(!user) {
+			throw new Error('This token is either invalid or expired!');
+		}
+		// 4. Hash new password
+		password = await bcrypt.hash(password, 10);
+		// 5. Save new password and remove token fields
+		const updatedUser = await ctx.db.mutation.updateUser({
+			where: { email: user.email },
+			data: {
+				password,
+				resetToken: null,
+				resetTokenExpiry: null
+			}
+		});
+		// 6. Generate JWT
+		const token = jwt.sign({ userId: updatedUser.id }, process.env.APP_SECRET);
+		// 7. Set JWT Cookie
+		ctx.response.cookie('token', token, {
+			httpOnly: true,
+			maxAge: 1000 * 60 * 60 * 24 * 365
+		});
+		// 8. Return the new User
+		return updatedUser;
+	}
 };
 
 module.exports = Mutations;
